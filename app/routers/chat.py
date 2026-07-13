@@ -43,6 +43,8 @@ class ChatRequest(BaseModel):
 @router.post("/chat/completions")
 async def chat_completions(req: ChatRequest):
     """Chat with smart streaming — forwards SSE immediately, executes tools inline."""
+    if not req.messages:
+        raise HTTPException(status_code=400, detail="messages must be a non-empty array")
     raw = [m.model_dump() for m in req.messages]
     msgs = inject_system(raw, req.tier)
 

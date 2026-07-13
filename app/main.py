@@ -1,5 +1,5 @@
-"""Kyrin API — app factory with lifespan management.
-Serves API (routers) + static frontend (kyrin-landing/dist/)."""
+"""Kyrin API — pure API server (no static frontend).
+Frontend (kyrin-landing) connects via Vite proxy at :5270."""
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,13 +22,7 @@ from app.routers import chat, search, crawl, anime, chats, rag as rag_router, yo
 # ── Config ──────────────────────────────────────────────
 _REQUIRE_KEY = os.environ.get("KYRIN_REQUIRE_API_KEY", "") in ("1", "true", "yes", "on")
 _SERVER_KEY = os.environ.get("KYRIN_API_KEY", "")
-_FE_DIST = Path(os.environ.get(
-    "KYRIN_FE_DIST",
-    str(Path(__file__).parent.parent.parent / "kyrin-landing" / "dist"),
-))
-
 PUBLIC_PATHS = {"/api/health", "/api/models", "/docs", "/openapi.json", "/redoc"}
-API_PREFIXES = {"/api/", "/docs", "/openapi", "/redoc"}
 
 
 @asynccontextmanager
@@ -40,24 +34,6 @@ async def lifespan(app: FastAPI):
     await migrate_json_to_sqlite()
     await warmup_rag()
     yield
-
-
-MIME_TYPES = {
-    ".html": "text/html; charset=utf-8",
-    ".js": "text/javascript",
-    ".css": "text/css",
-    ".json": "application/json",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".svg": "image/svg+xml",
-    ".ico": "image/x-icon",
-    ".webp": "image/webp",
-    ".woff2": "font/woff2",
-    ".woff": "font/woff",
-    ".ttf": "font/ttf",
-}
 
 
 def create_app() -> FastAPI:
@@ -139,31 +115,6 @@ def create_app() -> FastAPI:
                 {"id": "mimo-v2.5", "name": "MiMo V2.5"},
                 {"id": "qwen3.7-plus", "name": "Qwen 3.7 Plus"},
             ]}
-
-    # ── Static Frontend + SPA catch-all (production) ────
-    if _FE_DIST.is_dir() and (_FE_DIST / "index.html").exists():
-
-        @app.api_route("/{path:path}", methods=["GET"])
-        async def frontend(request: Request, path: str):
-            # Never handle API paths — let them 404 naturally
-            for prefix in API_PREFIXES:
-                if path.startswith(prefix.lstrip("/")):
-                    return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
-            file_path = _FE_DIST / path
-            if file_path.is_file():
-                ext = file_path.suffix.lower()
-                content_type = MIME_TYPES.get(ext, "application/octet-stream")
-                from fastapi.responses import FileResponse
-                return FileResponse(str(file_path), media_type=content_type)
-
-            # SPA fallback — all unmatched routes serve index.html
-            index = _FE_DIST / "index.html"
-            if index.exists():
-                from fastapi.responses import FileResponse
-                return FileResponse(str(index), media_type="text/html; charset=utf-8")
-
-            return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
     return app
 

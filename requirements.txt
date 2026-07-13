@@ -10,4 +10,3 @@ PyMuPDF>=1.25
 youtube-transcript-api>=1.2
 slowapi>=0.1.10
 limits>=5.0.0
-aiofiles>=24.0.0
