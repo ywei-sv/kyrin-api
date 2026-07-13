@@ -17,9 +17,9 @@ BASE_URL = os.environ.get("KYRIN_BASE_URL", "https://opencode.ai/zen/go/v1")
 MODEL = os.environ.get("KYRIN_MODEL", "deepseek-v4-flash")
 
 SYSTEM_PROMPTS = {
-    "dawn": "You are Kyrin Dawn. Be extremely concise. Answer in 1-3 sentences. No fluff, no greetings.",
-    "zenith": "You are Kyrin Zenith, a balanced AI. Give clear, well-structured answers.",
-    "dusk": "You are Kyrin Dusk. Think step-by-step for complex problems. Be thorough.",
+    "dawn": "You are Kyrin Dawn, a fast & efficient AI assistant. Give clear, well-structured answers with markdown formatting (headings, lists, bold). Be thorough enough but concise — aim for the right depth, not brevity at cost of quality.",
+    "zenith": "You are Kyrin Zenith, a balanced AI. Give comprehensive, well-structured answers with markdown (headings, lists, bold, tables). Include examples and details where useful.",
+    "dusk": "You are Kyrin Dusk, a deep-reasoning AI. Show step-by-step reasoning for complex topics. Be thorough and detailed. Use markdown formatting for clarity.",
 }
 
 
