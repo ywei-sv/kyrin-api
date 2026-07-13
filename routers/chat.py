@@ -1,6 +1,8 @@
 """
 LLM chat completions — proxies to opencode-go with streaming + vision support.
+Auto-injects RAG context when documents are available.
 """
+
 import os
 import json
 from typing import AsyncGenerator
@@ -9,6 +11,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
+
+from routers.rag import build_rag_context
 
 router = APIRouter()
 
@@ -122,6 +126,16 @@ async def chat_completions(req: ChatRequest):
     """Proxy chat completions to the LLM with optional streaming."""
     raw = [m.model_dump() for m in req.messages]
     msgs = _inject_system(raw, req.tier)
+
+    # Auto RAG — query documents and inject context if found
+    last_user_msg = None
+    for m in reversed(raw):
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            last_user_msg = m["content"]
+            break
+    rag_context, rag_sources = build_rag_context(last_user_msg or "")
+    if rag_context:
+        msgs.insert(0, {"role": "system", "content": rag_context})
 
     payload = {
         "model": req.model or MODEL,
