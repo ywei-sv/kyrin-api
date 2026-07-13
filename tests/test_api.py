@@ -147,6 +147,22 @@ class TestChatsRouter:
         client.delete(f"/api/chats/{chat_id}")
 
 
+class TestModels:
+    def test_models_endpoint(self):
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "models" in data
+        assert len(data["models"]) > 0
+
+    def test_models_fallback(self):
+        # Should always return at least the static fallback models
+        resp = client.get("/api/models")
+        models = resp.json()["models"]
+        ids = [m["id"] for m in models]
+        assert "deepseek-v4-flash" in ids
+
+
 class TestCORS:
     def test_cors_headers(self):
         resp = client.options(

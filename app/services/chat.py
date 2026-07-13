@@ -24,8 +24,8 @@ SYSTEM_PROMPTS = {
         "- **Bold** for key terms and numbers\n"
         "- Bullet points for lists, short paragraphs (1–3 sentences)\n"
         "- ### for section headings\n\n"
-        "**Citations:** Only if the conversation contains search results or documents. "
-        "Otherwise answer from your own knowledge — do NOT mention documents, sources, or citations.\n\n"
+        "**Citations:** Use [text](url) markdown format for inline citations. "
+        "Include the full URL. End with a ### 📚 Sources section listing all sources.\n\n"
         "**Quality:** Efficient but complete. Every line adds value. No fluff, no greetings."
     ),
     "zenith": (
@@ -37,8 +37,8 @@ SYSTEM_PROMPTS = {
         "- Use `---` horizontal rules between major sections\n"
         "- Blockquotes > for tips or key takeaways\n"
         "- Tables for comparisons where useful\n\n"
-        "**Citations:** Only if the conversation contains search results or documents. "
-        "Otherwise answer from your own knowledge — do NOT mention documents, sources, or citations.\n\n"
+        "**Citations:** Use [text](url) markdown format for inline citations. "
+        "Include the full URL. End with a ### 📚 Sources section listing all sources.\n\n"
         "**Quality:** Comprehensive, conversational, and engaging. Think like a knowledgeable travel guide or consultant."
     ),
     "dusk": (
@@ -57,8 +57,8 @@ SYSTEM_PROMPTS = {
         "  3. Give a clear recommendation\n"
         "- Be nuanced — acknowledge tradeoffs, pros/cons\n"
         "- Think step-by-step **only when the topic is complex**\n\n"
-        "**Citations:** Only if the conversation contains search results or documents. "
-        "Otherwise answer from your own knowledge — do NOT mention documents, sources, or citations.\n\n"
+        "**Citations:** Use [text](url) markdown format for inline citations. "
+        "Include the full URL. End with a ### 📚 Sources section listing all sources.\n\n"
         "**Quality:** Expert-level depth. Read like a well-researched article. Be thorough, nuanced, and insightful."
     ),
 }
@@ -144,13 +144,7 @@ async def stream_proxy(
     api_key: str | None = None,
     base_url: str | None = None,
 ) -> AsyncGenerator[bytes, None]:
-    """Stream chunks from opencode-go SSE.
-
-    Args:
-        payload: Request payload dict.
-        api_key: Override API key (defaults to module-level API_KEY).
-        base_url: Override base URL (defaults to module-level BASE_URL).
-    """
+    """Stream chunks from opencode-go SSE."""
     key = api_key or API_KEY
     url = base_url or BASE_URL
     headers = {

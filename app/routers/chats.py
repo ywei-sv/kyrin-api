@@ -10,6 +10,7 @@ import glob
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+import httpx
 
 from app.database import get_db
 
@@ -144,3 +145,44 @@ async def delete_chat(chat_id: str):
         db.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
         db.commit()
     return {"status": "deleted", "id": chat_id}
+
+
+class GenerateTitleRequest(BaseModel):
+    messages: list[dict]
+
+
+@router.post("/chats/generate-title")
+async def generate_chat_title(req: GenerateTitleRequest):
+    """Generate a concise chat title from first Q&A using LLM."""
+    if not req.messages:
+        return {"title": "New chat"}
+    api_key = os.environ.get("KYRIN_API_KEY", "")
+    base_url = os.environ.get("KYRIN_BASE_URL", "https://opencode.ai/zen/go/v1")
+    if not api_key:
+        # Fallback: use first user message as title
+        first = next((m.get("content", "") for m in req.messages if m.get("role") == "user"), "New chat")
+        txt = first[:42] + "..." if len(first) > 45 else first
+        return {"title": txt}
+
+    llm_msgs = [
+        {"role": "system", "content": "Generate a concise title (max 6 words, in Thai if the conversation is in Thai) for this conversation. Return ONLY the title — no quotes, no punctuation, no explanation."},
+        *req.messages,
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{base_url}/chat/completions",
+                json={"model": "deepseek-v4-flash", "messages": llm_msgs, "max_tokens": 30, "stream": False},
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            )
+            if resp.is_success:
+                data = resp.json()
+                title = (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip().strip('"').strip("'")
+                if title:
+                    return {"title": title[:60]}
+    except Exception:
+        pass
+    # Fallback
+    first = next((m.get("content", "") for m in req.messages if m.get("role") == "user"), "New chat")
+    txt = first[:42] + "..." if len(first) > 45 else first
+    return {"title": txt}
