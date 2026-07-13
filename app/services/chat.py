@@ -1,24 +1,19 @@
 """
-LLM chat completions — proxies to opencode-go with streaming + vision support.
-Auto-injects RAG context when documents are available.
+Chat business logic — system prompts, tool definitions, tool execution, and streaming.
 """
 
 import os
 import json
+import re
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 import httpx
 
-from routers.rag import build_rag_context
+from app.config import settings
 
-router = APIRouter()
-
-API_KEY = os.environ.get("KYRIN_API_KEY", "")
-BASE_URL = os.environ.get("KYRIN_BASE_URL", "https://opencode.ai/zen/go/v1")
-MODEL = os.environ.get("KYRIN_MODEL", "deepseek-v4-flash")
+API_KEY = os.environ.get("KYRIN_API_KEY", settings.kyrin_api_key)
+BASE_URL = os.environ.get("KYRIN_BASE_URL", settings.kyrin_base_url)
+MODEL = os.environ.get("KYRIN_MODEL", settings.kyrin_model)
 
 SYSTEM_PROMPTS = {
     "dawn": (
@@ -68,26 +63,6 @@ SYSTEM_PROMPTS = {
     ),
 }
 
-
-class ChatMessage(BaseModel):
-    role: str
-    content: str | list[dict]  # supports vision format
-
-
-class ChatRequest(BaseModel):
-    messages: list[ChatMessage]
-    model: str = MODEL
-    tier: str = "zenith"
-    stream: bool = True
-    max_tokens: int = 8192
-
-
-class ChatResponse(BaseModel):
-    id: str
-    choices: list[dict]
-    usage: dict | None = None
-
-
 # ── Function Calling Tools ────────────────────────────
 TOOLS = [
     {
@@ -121,7 +96,7 @@ TOOLS = [
 ]
 
 
-async def _exec_tool(name: str, args: dict) -> str:
+async def exec_tool(name: str, args: dict) -> str:
     """Execute a tool and return the result as a string."""
     try:
         if name == "search_web":
@@ -129,8 +104,11 @@ async def _exec_tool(name: str, args: dict) -> str:
             if not query:
                 return "Error: No query provided"
             async with httpx.AsyncClient(timeout=15) as client:
-                searxng = os.environ.get("SEARXNG_URL", "http://localhost:8080")
-                resp = await client.get(f"{searxng}/search", params={"q": query, "format": "json", "language": "th"})
+                searxng = os.environ.get("SEARXNG_URL", settings.searxng_url)
+                resp = await client.get(
+                    f"{searxng}/search",
+                    params={"q": query, "format": "json", "language": "th"},
+                )
                 resp.raise_for_status()
                 data = resp.json()
                 results = data.get("results", [])[:5]
@@ -151,7 +129,6 @@ async def _exec_tool(name: str, args: dict) -> str:
                 resp = await client.get(url, follow_redirects=True)
                 resp.raise_for_status()
                 text = resp.text[:8000]
-                import re
                 text = re.sub(r"<[^>]+>", " ", text)
                 text = re.sub(r"\s+", " ", text).strip()
                 return f"Content from {url} (first {len(text)} chars):\n\n{text[:4000]}"
@@ -161,7 +138,7 @@ async def _exec_tool(name: str, args: dict) -> str:
         return f"Error executing {name}: {str(e)}"
 
 
-async def _stream_proxy(payload: dict) -> AsyncGenerator[bytes, None]:
+async def stream_proxy(payload: dict) -> AsyncGenerator[bytes, None]:
     """Stream chunks from opencode-go SSE."""
     headers = {
         "Authorization": f"Bearer {API_KEY}",
@@ -175,92 +152,7 @@ async def _stream_proxy(payload: dict) -> AsyncGenerator[bytes, None]:
                 yield chunk
 
 
-def _inject_system(messages: list[dict], tier: str) -> list[dict]:
+def inject_system(messages: list[dict], tier: str) -> list[dict]:
     """Prepend system prompt based on model tier."""
     prompt = SYSTEM_PROMPTS.get(tier, SYSTEM_PROMPTS["zenith"])
     return [{"role": "system", "content": prompt}, *messages]
-
-
-@router.post("/chat/completions")
-async def chat_completions(req: ChatRequest):
-    """Proxy chat completions to the LLM with optional streaming."""
-    raw = [m.model_dump() for m in req.messages]
-    msgs = _inject_system(raw, req.tier)
-
-    # Auto RAG — query documents and inject context if found
-    last_user_msg = None
-    for m in reversed(raw):
-        if m.get("role") == "user" and isinstance(m.get("content"), str):
-            last_user_msg = m["content"]
-            break
-    rag_context, rag_sources = build_rag_context(last_user_msg or "")
-    if rag_context:
-        # Don't inject if results are only about Kyrin itself (user asking about Kyrin, not using RAG)
-        skip_words = ['kyrin-intro', 'kyrin-devlog', 'kyrin-model', 'kyrin-chat']
-        skip = any(any(w in s.get('source','') for w in skip_words) for s in rag_sources)
-        if not skip or len(rag_sources) > 1:
-            msgs.insert(0, {"role": "system", "content": rag_context})
-
-    payload = {
-        "model": req.model or MODEL,
-        "messages": msgs,
-        "max_tokens": req.max_tokens,
-        "stream": req.stream,
-    }
-
-    if req.stream:
-        return StreamingResponse(
-            _stream_proxy(payload),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=180) as client:
-        # First call with tools
-        payload_with_tools = {**payload, "stream": False, "tools": TOOLS}
-        resp = await client.post(
-            f"{BASE_URL}/chat/completions", json=payload_with_tools, headers=headers
-        )
-        if not resp.is_success:
-            raise HTTPException(status_code=resp.status_code, detail=resp.text)
-        data = resp.json()
-
-        # Check for function calling
-        choice = data.get("choices", [{}])[0]
-        msg = choice.get("message", {})
-        if msg.get("tool_calls"):
-            # Execute tools and append results
-            for tc in msg["tool_calls"]:
-                fn = tc.get("function", {})
-                name = fn.get("name", "")
-                try:
-                    args = json.loads(fn.get("arguments", "{}"))
-                except json.JSONDecodeError:
-                    args = {}
-                result = await _exec_tool(name, args)
-                msgs.append(msg)
-                msgs.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result})
-
-            # Second call (no tools) for synthesis
-            payload2 = {
-                "model": req.model or MODEL,
-                "messages": msgs,
-                "max_tokens": req.max_tokens,
-                "stream": False,
-            }
-            resp2 = await client.post(
-                f"{BASE_URL}/chat/completions", json=payload2, headers=headers
-            )
-            if not resp2.is_success:
-                raise HTTPException(status_code=resp2.status_code, detail=resp2.text)
-            return resp2.json()
-
-        return data

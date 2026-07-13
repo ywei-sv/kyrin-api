@@ -1,48 +1,15 @@
-"""
-Kyrin API — AI harness backend
-FastAPI server providing LLM proxy, web search, crawl, anime identification, and vision.
-"""
+"""Entry point — delegates to app.main."""
+import os, sys
 
-import os
-from pathlib import Path
+sys.path.insert(0, os.path.dirname(__file__))
 from dotenv import load_dotenv
+from pathlib import Path
 
 load_dotenv(Path(__file__).parent / ".env")
-
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from routers import chat, search, crawl, anime, chats, rag_api, youtube
-
-app = FastAPI(title="Kyrin API", version="1.0.0", docs_url="/docs")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(chat.router, prefix="/api")
-app.include_router(search.router, prefix="/api")
-app.include_router(crawl.router, prefix="/api")
-app.include_router(anime.router, prefix="/api")
-app.include_router(chats.router, prefix="/api")
-app.include_router(rag_api.router, prefix="/api")
-app.include_router(youtube.router, prefix="/api")
-
-
-@app.get("/api/health")
-async def health():
-    return {
-        "status": "ok",
-        "service": "kyrin-api",
-        "version": "1.0.0",
-        "model": os.environ.get("KYRIN_MODEL", "deepseek-v4-flash"),
-    }
-
+from app.main import app
 
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)

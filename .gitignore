@@ -24,3 +24,8 @@ Thumbs.db
 # Logs
 *.log
 /tmp/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3

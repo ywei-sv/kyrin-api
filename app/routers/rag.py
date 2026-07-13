@@ -1,5 +1,5 @@
 """
-Kyrin RAG Engine — document ingestion + vector search
+Kyrin RAG Engine — document ingestion + vector search + API endpoints.
 Uses ChromaDB with built-in ONNX embedding (no PyTorch/sentence-transformers needed).
 """
 
@@ -12,6 +12,12 @@ from typing import Optional
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from pydantic import BaseModel
+
+from app.services import build_rag_context, delete_document, search_documents, get_collection
+
+router = APIRouter()
 
 # ── Config ─────────────────────────────────────────────
 DATA_DIR = Path(os.environ.get("KYRIN_RAG_DIR", os.path.expanduser("~/.kyrin/rag")))
@@ -168,31 +174,6 @@ def query(q: str, top_k: int = TOP_K) -> list[dict]:
     return items
 
 
-def build_rag_context(q: str) -> tuple[str, list[dict]]:
-    """Query RAG and build context string + sources list for LLM injection."""
-    results = query(q)
-    if not results:
-        return "", []
-
-    context_parts = []
-    sources = []
-    for i, r in enumerate(results, 1):
-        context_parts.append(f"[{i}] (from: {r['source']})\n{r['content']}")
-        sources.append({
-            "index": i,
-            "source": r["source"],
-            "snippet": r["content"][:100],
-        })
-
-    context = (
-        "\n\n## 📚 Retrieved Documents\n"
-        + "\n\n".join(context_parts)
-        + "\n\n**Instructions:** Use the above documents to answer. Cite sources as [1], [2], etc. "
-        "If documents don't contain the answer, say so."
-    )
-    return context, sources
-
-
 def list_documents() -> list[str]:
     """List unique document sources in the vector store."""
     collection = _get_collection()
@@ -209,11 +190,101 @@ def list_documents() -> list[str]:
         return []
 
 
-def delete_document(filename: str) -> bool:
-    """Remove all chunks for a document."""
-    collection = _get_collection()
+# ── API Models ────────────────────────────────────────
+UPLOAD_DIR = Path(
+    os.environ.get("KYRIN_RAG_UPLOAD_DIR", os.path.expanduser("~/.kyrin/rag/uploads"))
+)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+SUPPORTED_EXT = {".pdf", ".txt", ".md"}
+
+
+class QueryRequest(BaseModel):
+    query: str
+    top_k: int = 5
+
+
+class QueryResponse(BaseModel):
+    results: list[dict]
+
+
+class IngestTextRequest(BaseModel):
+    text: str
+    filename: str = "paste.txt"
+
+
+class IngestResponse(BaseModel):
+    ingested: int
+    filename: str
+    error: str | None = None
+
+
+# ── Endpoints ─────────────────────────────────────────
+@router.post("/rag/ingest", response_model=IngestResponse)
+async def ingest_file(file: UploadFile = File(...)):
+    """Upload and ingest a document (PDF, TXT, MD)."""
+    ext = Path(file.filename or "file.txt").suffix.lower()
+    if ext not in SUPPORTED_EXT:
+        raise HTTPException(400, f"Unsupported file type: {ext}. Use: {', '.join(SUPPORTED_EXT)}")
+
+    # Save to temp then ingest
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Empty file")
+
+    tmp = UPLOAD_DIR / file.filename
+    with open(tmp, "wb") as f:
+        f.write(content)
+
     try:
-        collection.delete(where={"source": filename})
-        return True
-    except Exception:
-        return False
+        result = ingest(tmp)
+        return IngestResponse(**result)
+    except Exception as e:
+        raise HTTPException(500, f"Ingest failed: {e}")
+
+
+@router.post("/rag/ingest-text", response_model=IngestResponse)
+async def ingest_text_endpoint(req: IngestTextRequest):
+    """Ingest raw text directly."""
+    try:
+        result = ingest_text(req.text, req.filename)
+        return IngestResponse(**result)
+    except Exception as e:
+        raise HTTPException(500, f"Ingest failed: {e}")
+
+
+@router.post("/rag/query", response_model=QueryResponse)
+async def query_rag(req: QueryRequest):
+    """Query the RAG index for relevant chunks."""
+    try:
+        results = query(req.query, req.top_k)
+        return QueryResponse(results=results)
+    except Exception as e:
+        raise HTTPException(500, f"Query failed: {e}")
+
+
+@router.get("/rag/documents")
+async def list_docs():
+    """List all ingested documents."""
+    return {"documents": list_documents()}
+
+
+@router.delete("/rag/documents/{filename}")
+async def delete_doc(filename: str):
+    """Delete an ingested document."""
+    ok = delete_document(filename)
+    if not ok:
+        raise HTTPException(404, f"Document '{filename}' not found")
+
+    # Also clean up upload
+    fp = UPLOAD_DIR / filename
+    if fp.exists():
+        fp.unlink()
+    return {"status": "deleted", "filename": filename}
+
+
+@router.get("/rag/context")
+async def get_rag_context(q: str):
+    """Build RAG context string + sources for LLM injection (client-side use)."""
+    context, sources = build_rag_context(q)
+    return {"context": context, "sources": sources}
