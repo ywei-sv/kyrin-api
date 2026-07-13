@@ -101,6 +101,79 @@ class ChatResponse(BaseModel):
     usage: dict | None = None
 
 
+# ── Function Calling Tools ────────────────────────────
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Search the web for current information. Use when user asks about news, facts, or recent events.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"}
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "crawl_url",
+            "description": "Fetch and extract content from a URL. Use when user wants to analyze a webpage.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to crawl"}
+                },
+                "required": ["url"],
+            },
+        },
+    },
+]
+
+
+async def _exec_tool(name: str, args: dict) -> str:
+    """Execute a tool and return the result as a string."""
+    try:
+        if name == "search_web":
+            query = args.get("query", "")
+            if not query:
+                return "Error: No query provided"
+            async with httpx.AsyncClient(timeout=15) as client:
+                searxng = os.environ.get("SEARXNG_URL", "http://localhost:8080")
+                resp = await client.get(f"{searxng}/search", params={"q": query, "format": "json", "language": "th"})
+                resp.raise_for_status()
+                data = resp.json()
+                results = data.get("results", [])[:5]
+                if not results:
+                    return f"No results found for '{query}'."
+                lines = []
+                for r in results:
+                    title = r.get("title", "")
+                    url = r.get("url", "")
+                    snippet = (r.get("content", "") or "")[:300]
+                    lines.append(f"- {title}\n  URL: {url}\n  {snippet}")
+                return f"Web search results for '{query}':\n\n" + "\n\n".join(lines)
+        elif name == "crawl_url":
+            url = args.get("url", "")
+            if not url:
+                return "Error: No URL provided"
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(url, follow_redirects=True)
+                resp.raise_for_status()
+                text = resp.text[:8000]
+                import re
+                text = re.sub(r"<[^>]+>", " ", text)
+                text = re.sub(r"\s+", " ", text).strip()
+                return f"Content from {url} (first {len(text)} chars):\n\n{text[:4000]}"
+        else:
+            return f"Unknown tool: {name}"
+    except Exception as e:
+        return f"Error executing {name}: {str(e)}"
+
+
 async def _stream_proxy(payload: dict) -> AsyncGenerator[bytes, None]:
     """Stream chunks from opencode-go SSE."""
     headers = {
@@ -160,9 +233,43 @@ async def chat_completions(req: ChatRequest):
         "Content-Type": "application/json",
     }
     async with httpx.AsyncClient(timeout=180) as client:
+        # First call with tools
+        payload_with_tools = {**payload, "stream": False, "tools": TOOLS}
         resp = await client.post(
-            f"{BASE_URL}/chat/completions", json=payload, headers=headers
+            f"{BASE_URL}/chat/completions", json=payload_with_tools, headers=headers
         )
         if not resp.is_success:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
-        return resp.json()
+        data = resp.json()
+
+        # Check for function calling
+        choice = data.get("choices", [{}])[0]
+        msg = choice.get("message", {})
+        if msg.get("tool_calls"):
+            # Execute tools and append results
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                try:
+                    args = json.loads(fn.get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    args = {}
+                result = await _exec_tool(name, args)
+                msgs.append(msg)
+                msgs.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result})
+
+            # Second call (no tools) for synthesis
+            payload2 = {
+                "model": req.model or MODEL,
+                "messages": msgs,
+                "max_tokens": req.max_tokens,
+                "stream": False,
+            }
+            resp2 = await client.post(
+                f"{BASE_URL}/chat/completions", json=payload2, headers=headers
+            )
+            if not resp2.is_success:
+                raise HTTPException(status_code=resp2.status_code, detail=resp2.text)
+            return resp2.json()
+
+        return data
