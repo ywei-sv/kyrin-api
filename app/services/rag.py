@@ -210,8 +210,19 @@ def delete_document(source: str) -> bool:
         return False
 
 
+_rag_has_docs = None
+
+def _check_has_docs() -> bool:
+    global _rag_has_docs
+    if _rag_has_docs is None:
+        docs = list_documents()
+        _rag_has_docs = len(docs) > 0
+    return _rag_has_docs
+
 def build_rag_context(q: str) -> tuple[str, list[dict]]:
     """Query RAG and build context string + sources list for LLM injection."""
+    if not _check_has_docs():
+        return "", []
     results = search_documents(q)
     if not results:
         return "", []

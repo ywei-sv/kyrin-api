@@ -1,11 +1,7 @@
 """
-LLM chat completions — proxies to opencode-go with streaming + vision support.
-Auto-injects RAG context when documents are available.
-Uses shared business logic from app.services.chat.
-
-Two-round approach:
-  Round 1 (non-streaming, with tools) → tool execution if needed
-  Round 2 (streaming, no tools) → final response to client
+LLM chat completions — smart streaming with inline tool execution.
+Instead of two sequential LLM calls, we stream the first call (with tools)
+and only pause + execute tools if the LLM actually calls one.
 """
 
 import os
@@ -21,7 +17,6 @@ from app.services.chat import (
     SYSTEM_PROMPTS,
     TOOLS,
     exec_tool,
-    stream_proxy,
     inject_system,
 )
 
@@ -34,7 +29,7 @@ MODEL = os.environ.get("KYRIN_MODEL", "deepseek-v4-flash")
 
 class ChatMessage(BaseModel):
     role: str
-    content: str | list[dict]  # supports vision format
+    content: str | list[dict]
 
 
 class ChatRequest(BaseModel):
@@ -45,71 +40,13 @@ class ChatRequest(BaseModel):
     max_tokens: int = 8192
 
 
-class ChatResponse(BaseModel):
-    id: str
-    choices: list[dict]
-    usage: dict | None = None
-
-
-# ── API Endpoint ───────────────────────────────────────
-
-
-@router.post("/chat/gentitle")
-async def generate_title(messages: list[ChatMessage]):
-    """Generate a concise title from conversation messages using LLM."""
-    if not messages:
-        raise HTTPException(status_code=400, detail="Need at least one message")
-
-    msgs = [
-        {"role": "system", "content": "Generate a concise title (5 words or fewer, Thai) for this conversation. Respond with ONLY the title, no quotes, no punctuation."},
-        *[{"role": m.role, "content": m.content if isinstance(m.content, str) else str(m.content)} for m in messages[:4]],
-    ]
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": MODEL,
-        "messages": msgs,
-        "max_tokens": 20,
-        "stream": False,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(f"{BASE_URL}/chat/completions", json=payload, headers=headers)
-            if resp.is_success:
-                data = resp.json()
-                title = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip().strip('"').strip("'").strip()
-                if title:
-                    return {"title": title}
-    except Exception:
-        pass
-
-    # Fallback: use first user message truncated
-    first = None
-    for m in messages:
-        if m.role == "user" and isinstance(m.content, str):
-            first = m.content
-            break
-    if first:
-        title = first.replace("###", "").replace("**", "").strip()[:50]
-        return {"title": title or "Chat"}
-    return {"title": "New chat"}
-
-
 @router.post("/chat/completions")
 async def chat_completions(req: ChatRequest):
-    """Proxy chat completions with two-round tool calling support.
-
-    Round 1: Non-streaming with tools → detect tool calls, execute them.
-    Round 2: Streaming (or not) without tools → forward to client.
-    """
-    if not req.messages:
-        raise HTTPException(status_code=400, detail="messages must be a non-empty array")
+    """Chat with smart streaming — forwards SSE immediately, executes tools inline."""
     raw = [m.model_dump() for m in req.messages]
     msgs = inject_system(raw, req.tier)
 
-    # Auto RAG — query documents and inject context if relevant
+    # Auto RAG
     last_user_msg = None
     for m in reversed(raw):
         if m.get("role") == "user" and isinstance(m.get("content"), str):
@@ -140,65 +77,197 @@ async def chat_completions(req: ChatRequest):
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=180) as client:
+    async def smart_stream():
+        """Stream with inline tool execution.
 
-        # ── Round 1: non-streaming with tools ──────────
-        payload1 = {
+        Phase 1: Stream LLM response with tools. Forward all content/reasoning
+        chunks immediately. Buffer tool_calls if any.
+
+        Phase 2: If tool_calls were made, execute tools and stream the
+        follow-up response (no tools). The frontend sees a continuous stream.
+        """
+        async with httpx.AsyncClient(timeout=180) as client:
+
+            # ── Phase 1: stream with tools ─────────────────────
+            payload1 = {
+                "model": req.model or MODEL,
+                "messages": msgs,
+                "max_tokens": req.max_tokens,
+                "stream": True,
+                "tools": TOOLS,
+            }
+
+            tool_calls_buffer: dict[int, dict] = {}
+            finish_reason: str | None = None
+
+            async with client.stream(
+                "POST", f"{BASE_URL}/chat/completions",
+                json=payload1, headers=headers,
+            ) as resp:
+                buf = ""
+                async for chunk in resp.aiter_bytes():
+                    text = chunk.decode()
+                    buf += text
+                    lines = buf.split("\n")
+                    buf = lines.pop() or ""
+
+                    for line in lines:
+                        if not line.startswith("data: "):
+                            continue
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            yield (line + "\n").encode()
+                            continue
+
+                        try:
+                            data = json.loads(data_str)
+                            choices = data.get("choices", [])
+                            if not choices:
+                                yield (line + "\n").encode()
+                                continue
+
+                            delta = choices[0].get("delta", {})
+                            finish_reason = choices[0].get("finish_reason")
+
+                            # Buffer tool_calls for later execution
+                            tool_calls_delta = delta.get("tool_calls")
+                            if tool_calls_delta:
+                                for tc in tool_calls_delta:
+                                    idx = tc.get("index", 0)
+                                    if idx not in tool_calls_buffer:
+                                        tool_calls_buffer[idx] = {
+                                            "id": "",
+                                            "function": {"name": "", "arguments": ""},
+                                        }
+                                    if tc.get("id"):
+                                        tool_calls_buffer[idx]["id"] = tc["id"]
+                                    if tc.get("function", {}).get("name"):
+                                        tool_calls_buffer[idx]["function"]["name"] = tc["function"]["name"]
+                                    if tc.get("function", {}).get("arguments"):
+                                        tool_calls_buffer[idx]["function"]["arguments"] += tc["function"]["arguments"]
+
+                                # Forward to frontend WITHOUT tool_calls data
+                                # (frontend only handles content/reasoning)
+                                clean_delta = {
+                                    k: v for k, v in delta.items() if k != "tool_calls"
+                                }
+                                clean_data = {
+                                    **data,
+                                    "choices": [{**choices[0], "delta": clean_delta}],
+                                }
+                                yield f"data: {json.dumps(clean_data)}\n\n".encode()
+                            else:
+                                yield (line + "\n").encode()
+
+                        except json.JSONDecodeError:
+                            yield (line + "\n").encode()
+
+            # ── Phase 2: tool execution + follow-up stream ────
+            if tool_calls_buffer and finish_reason == "tool_calls":
+                # Reconstruct the assistant message with full tool_calls
+                tool_calls_list = []
+                for idx in sorted(tool_calls_buffer):
+                    tc = tool_calls_buffer[idx]
+                    tool_calls_list.append({
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"],
+                        },
+                    })
+
+                # Append assistant message (with tool calls)
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": tool_calls_list,
+                }
+                msgs.append(assistant_msg)
+
+                # Execute each tool and append results
+                for tc_data in tool_calls_list:
+                    fn = tc_data["function"]
+                    try:
+                        args = json.loads(fn.get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        args = {}
+                    result = await exec_tool(fn["name"], args)
+                    msgs.append({
+                        "role": "tool",
+                        "tool_call_id": tc_data["id"],
+                        "content": result,
+                    })
+
+                # Follow-up stream (no tools)
+                payload2 = {
+                    "model": req.model or MODEL,
+                    "messages": msgs,
+                    "max_tokens": req.max_tokens,
+                    "stream": True,
+                }
+                async with client.stream(
+                    "POST", f"{BASE_URL}/chat/completions",
+                    json=payload2, headers=headers,
+                ) as resp2:
+                    async for chunk in resp2.aiter_bytes():
+                        yield chunk
+
+    if req.stream:
+        return StreamingResponse(
+            smart_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # ── Non-streaming: single call with tools (fast path) ──
+    async with httpx.AsyncClient(timeout=180) as client:
+        payload = {
             "model": req.model or MODEL,
             "messages": msgs,
             "max_tokens": req.max_tokens,
             "stream": False,
             "tools": TOOLS,
         }
-        resp1 = await client.post(
-            f"{BASE_URL}/chat/completions", json=payload1, headers=headers
+        resp = await client.post(
+            f"{BASE_URL}/chat/completions", json=payload, headers=headers
         )
-        if not resp1.is_success:
-            raise HTTPException(status_code=resp1.status_code, detail=resp1.text)
-        data1 = resp1.json()
+        if not resp.is_success:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        data = resp.json()
+        msg = data.get("choices", [{}])[0].get("message", {})
 
-        choice = data1.get("choices", [{}])[0]
-        msg1 = choice.get("message", {})
-
-        # Execute any tool calls from Round 1
-        if msg1.get("tool_calls"):
-            for tc in msg1["tool_calls"]:
+        if msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
                 fn = tc.get("function", {})
-                name = fn.get("name", "")
                 try:
                     args = json.loads(fn.get("arguments", "{}"))
                 except json.JSONDecodeError:
                     args = {}
-                result = await exec_tool(name, args)
-                msgs.append(msg1)
+                result = await exec_tool(fn.get("name", ""), args)
+                msgs.append(msg)
                 msgs.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id", ""),
                     "content": result,
                 })
 
-        # ── Round 2: forward to client (streaming or not) ──
-        payload2 = {
-            "model": req.model or MODEL,
-            "messages": msgs,
-            "max_tokens": req.max_tokens,
-            "stream": req.stream,
-        }
-
-        if req.stream:
-            return StreamingResponse(
-                stream_proxy(payload2, API_KEY, BASE_URL),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
+            # Follow-up non-streaming
+            payload2 = {
+                "model": req.model or MODEL,
+                "messages": msgs,
+                "max_tokens": req.max_tokens,
+                "stream": False,
+            }
+            resp2 = await client.post(
+                f"{BASE_URL}/chat/completions", json=payload2, headers=headers,
             )
+            if not resp2.is_success:
+                raise HTTPException(status_code=resp2.status_code, detail=resp2.text)
+            return resp2.json()
 
-        resp2 = await client.post(
-            f"{BASE_URL}/chat/completions", json=payload2, headers=headers
-        )
-        if not resp2.is_success:
-            raise HTTPException(status_code=resp2.status_code, detail=resp2.text)
-        return resp2.json()
+        return data
