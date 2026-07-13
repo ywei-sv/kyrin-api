@@ -138,8 +138,9 @@ async def search(
     limit: int = Query(WEB_SEARCH_RESULT_COUNT, ge=1, le=50),
     engine: str = Query("searxng", description="Search engine"),
     rewrite: bool = Query(True, description="Auto-rewrite query"),
+    fallback: bool = Query(True, description="Auto-fallback to DuckDuckGo when SearXNG fails"),
 ):
-    """Search web with engine selection, dedup, and domain filtering."""
+    """Search web with engine selection, dedup, domain filtering, and auto-fallback."""
     query = _rewrite_query(q) if rewrite else q.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Empty query")
@@ -148,12 +149,37 @@ async def search(
     if not searcher:
         raise HTTPException(status_code=400, detail=f"Unknown engine: {engine}. Choose: {', '.join(ENGINES)}")
 
-    try:
-        results = await searcher(query, limit)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Try primary engine, with fallback chain
+    results = []
+    engines_tried = []
+    last_error = None
+
+    primary_engines = [engine]
+    if fallback and engine == "searxng" and DDGS_AVAILABLE:
+        primary_engines.append("ddg")
+
+    for eng in primary_engines:
+        searcher_fn = ENGINES.get(eng)
+        if not searcher_fn:
+            continue
+        try:
+            engines_tried.append(eng)
+            batch = await searcher_fn(query, limit)
+            if batch:
+                results = batch
+                engine = eng  # report which engine actually returned results
+                break
+        except HTTPException:
+            raise
+        except Exception as e:
+            last_error = str(e)
+            continue  # try next engine in chain
+
+    if not results:
+        detail = f"All engines failed" if len(engines_tried) > 1 else f"{engine} error"
+        if last_error:
+            detail += f": {last_error}"
+        raise HTTPException(status_code=502, detail=detail)
 
     results = _filter_domain(results)
     results = _deduplicate(results)
@@ -161,5 +187,7 @@ async def search(
     return {
         "query": query,
         "engine": engine,
+        "engines_tried": engines_tried,
+        "fallback_used": len(engines_tried) > 1,
         "results": [r.model_dump() for r in results],
     }

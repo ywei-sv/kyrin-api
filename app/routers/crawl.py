@@ -26,8 +26,12 @@ class CrawlResponse(BaseModel):
 async def crawl(req: CrawlRequest):
     """Fetch and extract content from a web page."""
     url = req.url.strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
+    if url in ("https://", "http://"):
+        raise HTTPException(status_code=400, detail="Invalid URL")
 
     try:
         # Try direct fetch first
@@ -63,7 +67,15 @@ async def crawl(req: CrawlRequest):
 
     # Strip tags for text content
     import re
-    text = re.sub(r"<[^>]+>", " ", raw)
+    text = raw
+    # Remove script/style blocks first
+    text = re.sub(r"<script[^>]*>[\s\S]*?</script>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<style[^>]*>[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
+    # Remove HTML tags (handle nested quotes in attributes)
+    text = re.sub(r"<[^>]*>", " ", text)
+    # Decode common HTML entities
+    text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    text = re.sub(r"&#(\d+);", lambda m: chr(int(m.group(1))), text)
     text = re.sub(r"\s+", " ", text).strip()
 
     truncated = len(text) > req.max_chars

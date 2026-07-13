@@ -29,12 +29,18 @@ def get_db():
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL DEFAULT 'New chat',
                 messages TEXT NOT NULL DEFAULT '[]',
-                updatedAt REAL NOT NULL
+                updatedAt REAL NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
             )
         """)
         _local.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chats_updated ON chats(updatedAt DESC)"
         )
+        # Add metadata column if upgrading from old schema
+        try:
+            _local.conn.execute("ALTER TABLE chats ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         _local.conn.commit()
     try:
         yield _local.conn

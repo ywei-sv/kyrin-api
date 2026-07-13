@@ -1,17 +1,16 @@
 """
 Chat session persistence — saves/loads chats using SQLite (via built-in sqlite3).
 Auto-migrates existing JSON files on first run.
+Supports metadata column for tier/model info.
 """
 
 import os
 import json
 import glob
 import sqlite3
-import threading
-from contextlib import contextmanager
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.database import get_db
 
@@ -25,13 +24,12 @@ JSON_DIR = DATA_DIR  # where old JSON files live
 @router.on_event("startup")
 async def migrate_json_to_sqlite():
     """Migrate existing JSON files to SQLite on first run (once)."""
-    # Check if JSON dir still has files AND SQLite already has data
     if not os.path.isdir(JSON_DIR):
         return
     with get_db() as db:
         count = db.execute("SELECT COUNT(*) as c FROM chats").fetchone()["c"]
         if count > 0:
-            return  # already migrated
+            return
 
         files = sorted(glob.glob(os.path.join(JSON_DIR, "*.json")), reverse=True)
         migrated = 0
@@ -43,15 +41,15 @@ async def migrate_json_to_sqlite():
                 title = data.get("title", "New chat")
                 messages = json.dumps(data.get("messages", []), ensure_ascii=False)
                 updated_at = data.get("updatedAt", 0)
+                metadata = json.dumps(data.get("metadata", {}), ensure_ascii=False)
                 db.execute(
-                    "INSERT OR REPLACE INTO chats (id, title, messages, updatedAt) VALUES (?, ?, ?, ?)",
-                    (sid, title, messages, float(updated_at)),
+                    "INSERT OR REPLACE INTO chats (id, title, messages, updatedAt, metadata) VALUES (?, ?, ?, ?, ?)",
+                    (sid, title, messages, float(updated_at), metadata),
                 )
                 migrated += 1
             except Exception:
                 continue
         db.commit()
-        # Rename JSON dir to mark migration done
         if migrated > 0:
             try:
                 os.rename(JSON_DIR, JSON_DIR + "_migrated")
@@ -64,6 +62,7 @@ class ChatSession(BaseModel):
     title: str
     messages: list[dict]
     updatedAt: int | float
+    metadata: dict = Field(default_factory=dict)
 
 
 @router.get("/chats")
@@ -71,7 +70,7 @@ async def list_chats():
     """List all saved chat sessions, sorted by updatedAt desc."""
     with get_db() as db:
         rows = db.execute(
-            "SELECT id, title, messages, updatedAt FROM chats ORDER BY updatedAt DESC"
+            "SELECT id, title, messages, updatedAt, metadata FROM chats ORDER BY updatedAt DESC"
         ).fetchall()
         result = []
         for r in rows:
@@ -79,11 +78,16 @@ async def list_chats():
                 msgs = json.loads(r["messages"])
             except (json.JSONDecodeError, TypeError):
                 msgs = []
+            try:
+                meta = json.loads(r["metadata"])
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
             result.append({
                 "id": r["id"],
                 "title": r["title"],
                 "messages": msgs,
                 "updatedAt": r["updatedAt"],
+                "metadata": meta,
             })
         return result
 
@@ -93,7 +97,7 @@ async def get_chat(chat_id: str):
     """Get a single chat session."""
     with get_db() as db:
         row = db.execute(
-            "SELECT id, title, messages, updatedAt FROM chats WHERE id = ?",
+            "SELECT id, title, messages, updatedAt, metadata FROM chats WHERE id = ?",
             (chat_id,),
         ).fetchone()
     if not row:
@@ -102,11 +106,16 @@ async def get_chat(chat_id: str):
         msgs = json.loads(row["messages"])
     except (json.JSONDecodeError, TypeError):
         msgs = []
+    try:
+        meta = json.loads(row["metadata"])
+    except (json.JSONDecodeError, TypeError):
+        meta = {}
     return {
         "id": row["id"],
         "title": row["title"],
         "messages": msgs,
         "updatedAt": row["updatedAt"],
+        "metadata": meta,
     }
 
 
@@ -115,12 +124,13 @@ async def save_chat(session: ChatSession):
     """Save (create or overwrite) a chat session."""
     with get_db() as db:
         db.execute(
-            "INSERT OR REPLACE INTO chats (id, title, messages, updatedAt) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO chats (id, title, messages, updatedAt, metadata) VALUES (?, ?, ?, ?, ?)",
             (
                 session.id,
                 session.title,
                 json.dumps(session.messages, ensure_ascii=False),
                 float(session.updatedAt),
+                json.dumps(session.metadata, ensure_ascii=False),
             ),
         )
         db.commit()

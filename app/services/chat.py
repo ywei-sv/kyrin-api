@@ -130,6 +130,7 @@ async def exec_tool(name: str, args: dict) -> str:
                 resp.raise_for_status()
                 text = resp.text[:8000]
                 text = re.sub(r"<[^>]+>", " ", text)
+                text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
                 text = re.sub(r"\s+", " ", text).strip()
                 return f"Content from {url} (first {len(text)} chars):\n\n{text[:4000]}"
         else:
@@ -138,15 +139,27 @@ async def exec_tool(name: str, args: dict) -> str:
         return f"Error executing {name}: {str(e)}"
 
 
-async def stream_proxy(payload: dict) -> AsyncGenerator[bytes, None]:
-    """Stream chunks from opencode-go SSE."""
+async def stream_proxy(
+    payload: dict,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> AsyncGenerator[bytes, None]:
+    """Stream chunks from opencode-go SSE.
+
+    Args:
+        payload: Request payload dict.
+        api_key: Override API key (defaults to module-level API_KEY).
+        base_url: Override base URL (defaults to module-level BASE_URL).
+    """
+    key = api_key or API_KEY
+    url = base_url or BASE_URL
     headers = {
-        "Authorization": f"Bearer {API_KEY}",
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
     async with httpx.AsyncClient(timeout=180) as client:
         async with client.stream(
-            "POST", f"{BASE_URL}/chat/completions", json=payload, headers=headers
+            "POST", f"{url}/chat/completions", json=payload, headers=headers
         ) as resp:
             async for chunk in resp.aiter_bytes():
                 yield chunk
