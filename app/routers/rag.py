@@ -30,7 +30,6 @@ SUPPORTED_EXT = {".pdf", ".txt", ".md"}
 import asyncio
 
 
-@router.on_event("startup")
 async def warmup_rag():
     """Pre-warm ChromaDB embedding model on startup."""
     try:

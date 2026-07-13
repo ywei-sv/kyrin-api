@@ -1,5 +1,6 @@
-"""Kyrin API — app factory."""
+"""Kyrin API — app factory with lifespan management."""
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -16,14 +17,31 @@ from app.routers import chat, search, crawl, anime, chats, rag as rag_router, yo
 
 
 # ── Optional API Key Middleware ──────────────────────────
-_REQUIRE_KEY = os.environ.get("KYRIN_REQUIRE_API_KEY", "")
+_REQUIRE_KEY = os.environ.get("KYRIN_REQUIRE_API_KEY", "") in ("1", "true", "yes", "on")
 _SERVER_KEY = os.environ.get("KYRIN_API_KEY", "")
 
 PUBLIC_PATHS = {"/api/health", "/docs", "/openapi.json", "/redoc"}
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup: run migrations and warmup."""
+    from app.routers.chats import migrate_json_to_sqlite
+    from app.routers.rag import warmup_rag
+
+    await migrate_json_to_sqlite()
+    await warmup_rag()
+    yield  # app runs here
+    # Shutdown: nothing to clean up yet
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="Kyrin API", version="1.0.0", docs_url="/docs")
+    app = FastAPI(
+        title="Kyrin API",
+        version="1.0.0",
+        docs_url="/docs",
+        lifespan=lifespan,
+    )
 
     app.add_middleware(
         CORSMiddleware,
@@ -33,7 +51,6 @@ def create_app() -> FastAPI:
     )
 
     # ── Rate Limiting (optional) ──────────────────────────
-    # Set KYRIN_RATE_LIMIT=60/minute (default: disabled)
     rate_limit_str = os.environ.get("KYRIN_RATE_LIMIT", "")
     if rate_limit_str:
         limiter = Limiter(

@@ -2,6 +2,10 @@
 LLM chat completions — proxies to opencode-go with streaming + vision support.
 Auto-injects RAG context when documents are available.
 Uses shared business logic from app.services.chat.
+
+Two-round approach:
+  Round 1 (non-streaming, with tools) → tool execution if needed
+  Round 2 (streaming, no tools) → final response to client
 """
 
 import os
@@ -52,7 +56,11 @@ class ChatResponse(BaseModel):
 
 @router.post("/chat/completions")
 async def chat_completions(req: ChatRequest):
-    """Proxy chat completions to the LLM with optional streaming and function calling."""
+    """Proxy chat completions with two-round tool calling support.
+
+    Round 1: Non-streaming with tools → detect tool calls, execute them.
+    Round 2: Streaming (or not) without tools → forward to client.
+    """
     if not req.messages:
         raise HTTPException(status_code=400, detail="messages must be a non-empty array")
     raw = [m.model_dump() for m in req.messages]
@@ -66,7 +74,6 @@ async def chat_completions(req: ChatRequest):
             break
     rag_context, rag_sources = build_rag_context(last_user_msg or "")
     if rag_context and rag_sources:
-        # Filter out Kyrin-self RAG sources that aren't relevant to user queries
         skip_words = ['kyrin-intro', 'kyrin-devlog', 'kyrin-model', 'kyrin-chat']
         filtered = [
             s for s in rag_sources
@@ -85,44 +92,34 @@ async def chat_completions(req: ChatRequest):
             )
             msgs.insert(0, {"role": "system", "content": rag_context})
 
-    payload = {
-        "model": req.model or MODEL,
-        "messages": msgs,
-        "max_tokens": req.max_tokens,
-        "stream": req.stream,
-    }
-
-    if req.stream:
-        return StreamingResponse(
-            stream_proxy(payload, API_KEY, BASE_URL),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    # Non-streaming with function calling support
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
     }
-    async with httpx.AsyncClient(timeout=180) as client:
-        # First call with tools
-        payload_with_tools = {**payload, "stream": False, "tools": TOOLS}
-        resp = await client.post(
-            f"{BASE_URL}/chat/completions", json=payload_with_tools, headers=headers
-        )
-        if not resp.is_success:
-            raise HTTPException(status_code=resp.status_code, detail=resp.text)
-        data = resp.json()
 
-        # Check for function calling
-        choice = data.get("choices", [{}])[0]
-        msg = choice.get("message", {})
-        if msg.get("tool_calls"):
-            for tc in msg["tool_calls"]:
+    async with httpx.AsyncClient(timeout=180) as client:
+
+        # ── Round 1: non-streaming with tools ──────────
+        payload1 = {
+            "model": req.model or MODEL,
+            "messages": msgs,
+            "max_tokens": req.max_tokens,
+            "stream": False,
+            "tools": TOOLS,
+        }
+        resp1 = await client.post(
+            f"{BASE_URL}/chat/completions", json=payload1, headers=headers
+        )
+        if not resp1.is_success:
+            raise HTTPException(status_code=resp1.status_code, detail=resp1.text)
+        data1 = resp1.json()
+
+        choice = data1.get("choices", [{}])[0]
+        msg1 = choice.get("message", {})
+
+        # Execute any tool calls from Round 1
+        if msg1.get("tool_calls"):
+            for tc in msg1["tool_calls"]:
                 fn = tc.get("function", {})
                 name = fn.get("name", "")
                 try:
@@ -130,27 +127,35 @@ async def chat_completions(req: ChatRequest):
                 except json.JSONDecodeError:
                     args = {}
                 result = await exec_tool(name, args)
-                msgs.append(msg)
+                msgs.append(msg1)
                 msgs.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id", ""),
                     "content": result,
                 })
 
-            # Second call (no tools) for synthesis
-            payload2 = {
-                "model": req.model or MODEL,
-                "messages": msgs,
-                "max_tokens": req.max_tokens,
-                "stream": False,
-            }
-            resp2 = await client.post(
-                f"{BASE_URL}/chat/completions", json=payload2, headers=headers
-            )
-            if not resp2.is_success:
-                raise HTTPException(
-                    status_code=resp2.status_code, detail=resp2.text
-                )
-            return resp2.json()
+        # ── Round 2: forward to client (streaming or not) ──
+        payload2 = {
+            "model": req.model or MODEL,
+            "messages": msgs,
+            "max_tokens": req.max_tokens,
+            "stream": req.stream,
+        }
 
-        return data
+        if req.stream:
+            return StreamingResponse(
+                stream_proxy(payload2, API_KEY, BASE_URL),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        resp2 = await client.post(
+            f"{BASE_URL}/chat/completions", json=payload2, headers=headers
+        )
+        if not resp2.is_success:
+            raise HTTPException(status_code=resp2.status_code, detail=resp2.text)
+        return resp2.json()

@@ -69,11 +69,12 @@ class TestChatRouter:
     def test_chat_validation(self):
         """Messages must be a non-empty array."""
         resp = client.post("/api/chat/completions", json={"messages": []})
-        assert resp.status_code in (400, 422)
+        assert resp.status_code == 400
+        assert "non-empty" in resp.json()["detail"]
 
     def test_chat_missing_messages(self):
         resp = client.post("/api/chat/completions", json={})
-        assert resp.status_code == 422
+        assert resp.status_code == 422  # FastAPI validates required field
 
 
 class TestAnimeRouter:
@@ -104,11 +105,21 @@ class TestChatsRouter:
         assert resp.status_code == 200
         assert resp.json()["id"] == chat_id
 
-        # Get it back
+        # Get it back via detail endpoint
         resp = client.get(f"/api/chats/{chat_id}")
         assert resp.status_code == 200
         assert resp.json()["id"] == chat_id
         assert resp.json()["title"] == "Test Chat"
+        assert len(resp.json()["messages"]) == 1
+
+        # List should show msgCount, not full messages
+        resp = client.get("/api/chats")
+        assert resp.status_code == 200
+        listed = resp.json()
+        found = [c for c in listed if c["id"] == chat_id]
+        assert len(found) == 1
+        assert found[0]["msgCount"] == 1
+        assert "messages" not in found[0] or found[0].get("messages") is None
 
         # Delete it
         resp = client.delete(f"/api/chats/{chat_id}")

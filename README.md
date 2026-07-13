@@ -1,86 +1,96 @@
 # Kyrin API
 
-FastAPI backend for the Kyrin AI chat system — LLM proxy, function calling, web search, RAG pipeline, anime identification, and chat storage.
+FastAPI backend for the Kyrin AI chat system — LLM proxy with two-round function calling, web search, RAG pipeline, anime identification, and SQLite chat storage.
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  Frontend   │────▶│  Kyrin API   │────▶│  OpenCode Zen   │
-│  (React)    │     │  (FastAPI)   │     │  (LLM Provider) │
-│  :5270      │◀────│  :5271       │◀────│  api.opencode.ai │
-└─────────────┘     └──────┬───────┘     └─────────────────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         ┌─────────┐ ┌──────────┐ ┌──────────┐
-         │SearXNG  │ │ChromaDB  │ │SQLite    │
-         │:8080    │ │(vector)  │ │(chats)   │
-         └─────────┘ └──────────┘ └──────────┘
+┌──────────────┐     ┌───────────────┐     ┌─────────────────┐
+│  Frontend    │────▶│  Kyrin API    │────▶│  OpenCode Zen   │
+│  (React)     │     │  (FastAPI)    │     │  (LLM Provider) │
+│  :5270       │◀────│  :5271        │◀────│  api.opencode.ai│
+└──────────────┘     └───────┬───────┘     └─────────────────┘
+                            │
+               ┌────────────┼────────────┐
+               ▼            ▼            ▼
+          ┌─────────┐ ┌──────────┐ ┌──────────┐
+          │SearXNG  │ │ChromaDB  │ │SQLite    │
+          │:8080    │ │(vector)  │ │(chats)   │
+          └─────────┘ └──────────┘ └──────────┘
 ```
 
 ## Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/chat/completions` | Chat + function calling (SSE streaming) |
-| GET | `/api/search?q=...` | Web search (SearXNG) |
+| POST | `/api/chat/completions` | Two-round chat: tools then streaming response |
+| GET | `/api/search?q=...` | Web search (SearXNG + DuckDuckGo fallback) |
 | POST | `/api/crawl` | URL crawling |
-| GET | `/api/anime-search?url=...` | Anime identification via trace.moe |
+| GET/POST | `/api/anime-search` | Anime identification via trace.moe |
 | POST | `/api/rag/ingest` | Upload document (PDF/TXT/MD) |
+| POST | `/api/rag/ingest-text` | Ingest raw text |
 | POST | `/api/rag/query` | Query RAG documents |
-| GET | `/api/chats` | List saved chats |
+| GET | `/api/rag/documents` | List ingested documents |
+| DELETE | `/api/rag/documents/{filename}` | Delete a document |
+| GET | `/api/chats` | List chats (lightweight: title + count only) |
+| GET | `/api/chats/{id}` | Get full chat with messages |
 | POST | `/api/chats` | Save/update chat |
-| GET | `/api/chats/{id}` | Get chat by ID |
 | DELETE | `/api/chats/{id}` | Delete chat |
+| GET | `/api/youtube/transcript` | YouTube transcript fetcher |
 | GET | `/api/health` | Health check |
 
 ## Features
 
-- **3 Model Tiers**: Dawn (deepseek-v4-flash), Zenith (mimo-v2.5), Dusk (qwen3.7-plus)
-- **Function Calling**: `search_web(query)`, `crawl_url(url)` — model calls tools automatically
+- **Two-Round Function Calling**: Round 1 (non-streaming, with tools) → execute tools → Round 2 (streaming, no tools) → final answer
+- **3 Model Tiers**: Dawn, Zenith, Dusk — tier-specific system prompts
 - **RAG Pipeline**: ChromaDB + chunking + embedding + vector search (PDF/TXT/MD)
 - **Chat Persistence**: SQLite backend (`~/.kyrin/chats.db`)
-- **Web Search**: SearXNG (self-hosted)
+- **Web Search**: SearXNG (primary) + DuckDuckGo (fallback)
 - **Anime ID**: trace.moe API integration
 - **Image Vision**: base64 image support in chat
-- **Auto Tool Execution**: model decides → backend executes → final answer
+- **Smart RAG Filtering**: Skips Kyrin-self documents from context injection
+
+## Project Structure
+
+```
+kyrin-api/
+├── main.py                 # Entry point (uvicorn)
+├── app/
+│   ├── main.py             # FastAPI app factory + CORS + router mounts
+│   ├── config.py           # Pydantic settings (from .env)
+│   ├── database.py         # SQLite connection manager
+│   ├── services/
+│   │   ├── chat.py         # System prompts, tools, streaming, injection
+│   │   └── rag.py          # RAG engine: chunking, parsing, ingest, query
+│   └── routers/
+│       ├── chat.py         # /api/chat/completions (two-round)
+│       ├── chats.py        # /api/chats CRUD (SQLite)
+│       ├── search.py       # Web search (SearXNG + DDG)
+│       ├── rag.py          # RAG API endpoints (thin wrappers)
+│       ├── anime.py        # Anime identification
+│       ├── crawl.py        # URL crawling
+│       └── youtube.py      # YouTube transcript
+├── requirements.txt
+├── pyproject.toml
+├── .env.example
+└── README.md
+```
 
 ## Quick Start
 
 ```bash
-# 1. Clone
-git clone https://github.com/ywei-sv/kyrin-api.git
-cd kyrin-api
-
-# 2. Setup environment
-cp .env.example .env
-# Edit .env with your API keys
-
-# 3. Install dependencies
+# 1. Setup
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env  # edit with API keys
 
-# 4. Start server
-uvicorn main:app --host 0.0.0.0 --port 5271 --reload
+# 2. Start
+uvicorn app.main:app --host 0.0.0.0 --port 5271 --reload
 
-# 5. Verify
+# 3. Verify
 curl http://localhost:5271/api/health
-# → {"status":"ok","service":"kyrin-api","version":"1.0.0"}
-```
-
-## Development
-
-```bash
-# Install dev dependencies
-pip install -r requirements-dev.txt
-
-# Run tests
-pytest
-
-# Type check
-mypy main.py
+# → {"status":"ok","service":"kyrin-api","version":"1.0.0",...}
 ```
 
 ## Environment Variables
@@ -90,40 +100,31 @@ mypy main.py
 | `KYRIN_API_KEY` | — | OpenCode API key |
 | `KYRIN_BASE_URL` | `https://opencode.ai/zen/go/v1` | LLM API endpoint |
 | `KYRIN_MODEL` | `deepseek-v4-flash` | Default model |
-| `SEARXNG_URL` | `http://localhost:8080` | SearXNG instance |
+| `KYRIN_CHATS_DIR` | `~/.kyrin/chats` | SQLite db parent dir |
+| `KYRIN_RAG_DIR` | `~/.kyrin/rag` | ChromaDB persistent dir |
+| `SEARXNG_URL` | `http://127.0.0.1:8080` | SearXNG instance |
 | `TRACE_MOE_URL` | `https://api.trace.moe` | Anime search API |
 | `PORT` | `5271` | Server port |
 
-## Project Structure
+## Two-Round Chat Flow
 
 ```
-kyrin-api/
-├── main.py              # FastAPI app + CORS + router mounts (48 lines)
-├── requirements.txt     # Python dependencies
-├── .env                 # Local environment (gitignored)
-├── .env.example         # Environment template
-├── routers/
-│   ├── chat.py          # Chat completions (function calling, SSE streaming)
-│   ├── search.py        # Web search (SearXNG + DuckDuckGo fallback)
-│   ├── crawl.py         # URL crawling
-│   ├── anime.py         # Anime identification
-│   ├── rag.py           # RAG engine (ChromaDB, chunking, embedding)
-│   ├── rag_api.py       # RAG API endpoints
-│   ├── chats.py         # Chat persistence (SQLite)
-│   └── __init__.py
-└── README.md
+Request: stream=true
+  │
+  ├─ Round 1 (non-streaming, tools enabled)
+  │   POST /chat/completions {stream:false, tools:[search_web,crawl_url]}
+  │   │
+  │   ├─ LLM responds with text → skip to Round 2
+  │   └─ LLM calls search_web/crawl_url → backend executes → append results
+  │
+  └─ Round 2 (streaming, no tools)
+      POST /chat/completions {stream:true}
+      │
+      └─ Forward SSE stream to client
 ```
 
 ## Production
 
 ```bash
-# Using uvicorn directly
-uvicorn main:app --host 0.0.0.0 --port 5271 --workers 4
-
-# Or using gunicorn with uvicorn workers
-gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:5271
+uvicorn app.main:app --host 0.0.0.0 --port 5271 --workers 4
 ```
-
-## License
-
-Private — All rights reserved.

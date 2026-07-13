@@ -1,13 +1,12 @@
 """
 Chat session persistence — saves/loads chats using SQLite (via built-in sqlite3).
 Auto-migrates existing JSON files on first run.
-Supports metadata column for tier/model info.
+List endpoint is lightweight (title + msgCount only); full messages via GET /chats/{id}.
 """
 
 import os
 import json
 import glob
-import sqlite3
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -18,10 +17,10 @@ router = APIRouter()
 
 DATA_DIR = os.environ.get("KYRIN_CHATS_DIR", os.path.expanduser("~/.kyrin/chats"))
 DB_PATH = os.path.join(os.path.dirname(DATA_DIR), "chats.db")
-JSON_DIR = DATA_DIR  # where old JSON files live
+JSON_DIR = DATA_DIR
 
 
-@router.on_event("startup")
+# Startup migration called explicitly from app lifespan
 async def migrate_json_to_sqlite():
     """Migrate existing JSON files to SQLite on first run (once)."""
     if not os.path.isdir(JSON_DIR):
@@ -60,14 +59,14 @@ async def migrate_json_to_sqlite():
 class ChatSession(BaseModel):
     id: str
     title: str
-    messages: list[dict]
+    messages: list[dict] | None = None
     updatedAt: int | float
     metadata: dict = Field(default_factory=dict)
 
 
 @router.get("/chats")
 async def list_chats():
-    """List all saved chat sessions, sorted by updatedAt desc."""
+    """List all saved chat sessions (lightweight: no message bodies)."""
     with get_db() as db:
         rows = db.execute(
             "SELECT id, title, messages, updatedAt, metadata FROM chats ORDER BY updatedAt DESC"
@@ -76,8 +75,9 @@ async def list_chats():
         for r in rows:
             try:
                 msgs = json.loads(r["messages"])
+                msg_count = len(msgs)
             except (json.JSONDecodeError, TypeError):
-                msgs = []
+                msg_count = 0
             try:
                 meta = json.loads(r["metadata"])
             except (json.JSONDecodeError, TypeError):
@@ -85,7 +85,7 @@ async def list_chats():
             result.append({
                 "id": r["id"],
                 "title": r["title"],
-                "messages": msgs,
+                "msgCount": msg_count,
                 "updatedAt": r["updatedAt"],
                 "metadata": meta,
             })
@@ -94,7 +94,7 @@ async def list_chats():
 
 @router.get("/chats/{chat_id}")
 async def get_chat(chat_id: str):
-    """Get a single chat session."""
+    """Get a single chat session with full messages."""
     with get_db() as db:
         row = db.execute(
             "SELECT id, title, messages, updatedAt, metadata FROM chats WHERE id = ?",
@@ -128,7 +128,7 @@ async def save_chat(session: ChatSession):
             (
                 session.id,
                 session.title,
-                json.dumps(session.messages, ensure_ascii=False),
+                json.dumps(session.messages or [], ensure_ascii=False),
                 float(session.updatedAt),
                 json.dumps(session.metadata, ensure_ascii=False),
             ),
