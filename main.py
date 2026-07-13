@@ -11,7 +11,7 @@ load_dotenv(Path(__file__).parent / ".env")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import chat, search, crawl, anime, chats
+from routers import chat, search, crawl, anime, chats, rag_api, youtube
 
 app = FastAPI(title="Kyrin API", version="1.0.0", docs_url="/docs")
 
@@ -28,6 +28,8 @@ app.include_router(search.router, prefix="/api")
 app.include_router(crawl.router, prefix="/api")
 app.include_router(anime.router, prefix="/api")
 app.include_router(chats.router, prefix="/api")
+app.include_router(rag_api.router, prefix="/api")
+app.include_router(youtube.router, prefix="/api")
 
 
 @app.get("/api/health")
