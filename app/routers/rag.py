@@ -33,7 +33,7 @@ import asyncio
 async def warmup_rag():
     """Pre-warm ChromaDB embedding model on startup."""
     try:
-        from app.services import get_collection
+        from app.services.rag import get_collection
         coll = get_collection()
         # Dummy query to trigger ONNX model loading
         _ = coll.query(query_texts=["warmup"], n_results=1)

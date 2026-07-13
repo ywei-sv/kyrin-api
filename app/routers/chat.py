@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 
-from app.services import build_rag_context
+from app.services.rag import build_rag_context
 from app.services.chat import (
     SYSTEM_PROMPTS,
     TOOLS,
