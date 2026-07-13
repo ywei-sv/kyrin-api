@@ -208,7 +208,11 @@ async def chat_completions(req: ChatRequest):
             break
     rag_context, rag_sources = build_rag_context(last_user_msg or "")
     if rag_context:
-        msgs.insert(0, {"role": "system", "content": rag_context})
+        # Don't inject if results are only about Kyrin itself (user asking about Kyrin, not using RAG)
+        skip_words = ['kyrin-intro', 'kyrin-devlog', 'kyrin-model', 'kyrin-chat']
+        skip = any(any(w in s.get('source','') for w in skip_words) for s in rag_sources)
+        if not skip or len(rag_sources) > 1:
+            msgs.insert(0, {"role": "system", "content": rag_context})
 
     payload = {
         "model": req.model or MODEL,
