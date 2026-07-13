@@ -54,6 +54,49 @@ class ChatResponse(BaseModel):
 # ── API Endpoint ───────────────────────────────────────
 
 
+@router.post("/chat/gentitle")
+async def generate_title(messages: list[ChatMessage]):
+    """Generate a concise title from conversation messages using LLM."""
+    if not messages:
+        raise HTTPException(status_code=400, detail="Need at least one message")
+
+    msgs = [
+        {"role": "system", "content": "Generate a concise title (5 words or fewer, Thai) for this conversation. Respond with ONLY the title, no quotes, no punctuation."},
+        *[{"role": m.role, "content": m.content if isinstance(m.content, str) else str(m.content)} for m in messages[:4]],
+    ]
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": MODEL,
+        "messages": msgs,
+        "max_tokens": 20,
+        "stream": False,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(f"{BASE_URL}/chat/completions", json=payload, headers=headers)
+            if resp.is_success:
+                data = resp.json()
+                title = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip().strip('"').strip("'").strip()
+                if title:
+                    return {"title": title}
+    except Exception:
+        pass
+
+    # Fallback: use first user message truncated
+    first = None
+    for m in messages:
+        if m.role == "user" and isinstance(m.content, str):
+            first = m.content
+            break
+    if first:
+        title = first.replace("###", "").replace("**", "").strip()[:50]
+        return {"title": title or "Chat"}
+    return {"title": "New chat"}
+
+
 @router.post("/chat/completions")
 async def chat_completions(req: ChatRequest):
     """Proxy chat completions with two-round tool calling support.
