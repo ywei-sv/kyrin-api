@@ -33,7 +33,24 @@ async def anime_search(
     file: UploadFile | None = File(None),
     anilist_info: bool = Form(True),
 ):
-    """Identify anime from an image. Accepts image URL or uploaded file."""
+    """Identify anime from an image. Accepts image URL, uploaded file, or query param."""
+    return await _do_anime_search(url, file, anilist_info)
+
+
+@router.get("/anime-search", response_model=list[AnimeSearchResponse])
+async def anime_search_get(
+    url: str | None = None,
+    anilist_info: bool = True,
+):
+    """GET variant — accepts ?url= for browser convenience."""
+    return await _do_anime_search(url, None, anilist_info)
+
+
+async def _do_anime_search(
+    url: str | None,
+    file: UploadFile | None,
+    anilist_info: bool,
+) -> list[AnimeSearchResponse]:
     image_url = url
 
     # Handle file upload → convert to data URI
