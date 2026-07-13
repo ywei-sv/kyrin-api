@@ -1,31 +1,29 @@
 # Kyrin API
 
-FastAPI backend harness for Kyrin AI agent — connects chat, web search,
-web crawling, anime screenshot search, and image analysis.
-
-## Quick Start
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env  # then edit with your keys
-uvicorn main:app --reload --port 5271
-```
+FastAPI backend for the Kyrin chat system — LLM proxy, web search, chat storage.
 
 ## Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/chat` | Chat completion (SSE stream) with tool calling |
-| GET | `/api/tools/search?q=...` | Web search via SearXNG |
-| POST | `/api/tools/crawl` | Crawl URL via Crawl4AI |
-| GET | `/api/tools/anime?url=...` | Anime screenshot search |
-| POST | `/api/tools/vision` | Image analysis |
-| GET | `/health` | Health check |
+| POST | `/api/chat/completions` | Chat completion (SSE stream) with tier system prompts |
+| GET | `/api/search` | Web search (SearXNG / DuckDuckGo) |
+| GET | `/api/chats` | List saved chats |
+| POST | `/api/chats` | Save/update chat |
+| DELETE | `/api/chats/{id}` | Delete chat |
+| GET | `/api/health` | Health check |
+
+## Quick Start
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env  # edit with your keys
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
 
 ## Frontend
 
-Frontend is at [kyrin-landing](https://github.com/ywei-sv/document-hub).
-
-Vite config proxies `/api/*` → `http://localhost:5271`.
+Frontend at **[kyrin-landing](https://github.com/ywei-sv/kyrin-landing)**.
+See the [README](https://github.com/ywei-sv/kyrin-landing/blob/main/README.md) for full architecture & features.
